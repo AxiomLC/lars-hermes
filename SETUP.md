@@ -39,9 +39,14 @@ Master agent/platform name: **Lars**. Core setup doc for the customized Hermes U
 | Component | Choice | Rationale |
 |---|---|---|
 | STT | `faster-whisper` `tiny.en`, `int8`, `device=cpu` | Only near-real-time option on dual-core CPU |
-| TTS | Kokoro local ONNX (`kokoro-onnx`) | ~82M params, CPU-viable; **replaces jarvis_ai's cloud ElevenLabs provider** |
+| TTS | Kokoro local ONNX (`kokoro-onnx`) | ~82M params, CPU-viable; **replaces jarvis_ai's cloud ElevenLabs provider**. Voice: **`bm_lewis`** — objectively lowest male voice in the pack (median F0 92 Hz measured; `am_onyx` 93 Hz runner-up; all 12 male voices swept with autocorrelation F0). Listen samples: `voice_sample_bm_lewis.wav` / `voice_sample_am_onyx.wav` in repo root. |
 | Voice host | `jarvis_ai/server` (FastAPI) | Already implements streaming STT → Hermes → TTS |
 | Architecture | **5 isolated Hermes profiles**, one active at a time | CPU can't run concurrent agents; isolation keeps memory/context/skills per module |
+
+**API keys — none needed for voice.** Whisper and Kokoro are fully local: model files are fetched **once at install time** from Hugging Face (public, no account), then runtime is 100% offline — no keys, no cloud calls, for either STT or TTS. Only Lars' LLM brain (OpenRouter/DeepInfra) uses API keys.
+
+**Kokoro on local disk (setup-time downloads, do not commit):** `server/models/kokoro/` — `kokoro-v1.0.onnx` (311MB), `voices-v1.0.bin` (27MB, from kokoro-onnx GitHub releases `model-files-v1.0`; the per-voice `.bin` files on HF are raw arrays kokoro-onnx cannot load), `config.json`, `tokenizer.json`. Benchmark on i7-6600U: ~11–13s to synthesize 6s of speech (~2× realtime); if too slow in practice, swap to `model_quantized.onnx` (int8).
+
 
 ## 5. The 5 Divs (profiles/agents/modules)
 
