@@ -27,6 +27,8 @@ import os
 import re
 import threading
 import time
+
+import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Iterator
@@ -85,7 +87,9 @@ def read_usage() -> dict:
         except Exception:
             data = {"total": {}, "days": {}}
     return {"total": data.get("total", {}), "today": data.get("days", {}).get(_today(), {})}
-ENV_PATHS = [Path.home() / ".hermes" / ".env", ROOT / ".env"]
+ENV_PATHS = [Path.home() / ".hermes" / ".env",
+             Path(os.environ.get("LOCALAPPDATA", "")) / "hermes" / ".env",  # native Windows Hermes home (Lars build)
+             ROOT / ".env"]
 SENTENCE_RE = re.compile(r"(.+?[.!?])(?=\s|$)", re.DOTALL)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 CODEBLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
@@ -293,6 +297,48 @@ class HermesAPI:
 # ==================================================================== Pipeline
 
 
+# ------------------------------------------------------------------ TTS: Kokoro (local)
+
+_KOKORO_LOCK = threading.Lock()
+_KOKORO = None
+
+
+class KokoroTTS:
+    """Local ONNX Kokoro TTS (no cloud, no API keys). Model files are
+    setup-time downloads under models/kokoro/. Synthesizes one sentence and
+    returns raw PCM int16 bytes at the configured output rate (pcm_16000
+    compatible with the ElevenLabs path the HUD client expects)."""
+
+    def __init__(self, vcfg: dict):
+        import onnxruntime as rt
+        from kokoro_onnx import Kokoro
+
+        opt = rt.SessionOptions()
+        opt.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
+        n_threads = vcfg.get("threads")
+        if n_threads:
+            opt.intra_op_num_threads = int(n_threads)
+        sess = rt.InferenceSession(
+            vcfg["model_path"], sess_options=opt, providers=["CPUExecutionProvider"],
+        )
+        self.k = Kokoro.from_session(sess, vcfg["voices_path"])
+        self.voice = vcfg.get("voice", "bm_lewis")
+        self.lang = vcfg.get("lang", "en-us")
+        self.speed = float(vcfg.get("speed", 1.0))
+        self.out_rate = int(vcfg.get("sample_rate", 16000))
+        self._gen_lock = threading.Lock()
+
+    def synth_pcm16(self, text: str) -> np.ndarray:
+        with self._gen_lock:
+            audio, sr = self.k.create(text, voice=self.voice, speed=self.speed, lang=self.lang)
+        if sr != self.out_rate:
+            n_out = int(len(audio) * self.out_rate / sr)
+            audio = np.interp(
+                np.linspace(0.0, len(audio) - 1, n_out), np.arange(len(audio)), audio,
+            ).astype(np.float32)
+        return (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
+
+
 class VoicePipelineServer:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -436,6 +482,82 @@ class VoicePipelineServer:
 
     def tts_chunks_sync(self, text: str, timing: TurnTiming) -> Iterator[bytes]:
         voice = self.cfg["voice"]
+        timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
+        provider = (voice.get("provider") or "kokoro").lower()
+        try:
+            if provider == "groq":
+                return self._groq_chunks(text, timing, voice)
+            if provider == "elevenlabs":
+                return self._elevenlabs_chunks(text, timing, voice)
+            return self._kokoro_chunks(text, timing, voice)
+        except Exception as exc:
+            # Cloud TTS failed -> resilient local fallback (Lars build)
+            if provider != "kokoro":
+                print(f"{provider} TTS failed ({type(exc).__name__}: {exc}); falling back to local Kokoro", flush=True)
+                timing.errors.append(f"tts_{provider}_fallback: {exc}")
+                return self._kokoro_chunks(text, timing, voice)
+            raise
+
+    def _groq_chunks(self, text: str, timing: TurnTiming, voice: dict) -> Iterator[bytes]:
+        """Groq cloud TTS (Orpheus English). Fast; text is sent to Groq servers.
+        Returns 16 kHz PCM int16 chunks (decoded from the WAV response)."""
+        import io
+        import wave as wavemod
+        from scipy.signal import resample_poly
+        g = voice.get("groq") or {}
+        key = os.environ.get("GROQ_API_KEY")
+        if not key:
+            raise RuntimeError("GROQ_API_KEY not found in environment")
+        timing.tts_model = g.get("model", "canopylabs/orpheus-v1-english")
+        timing.voice_id = g.get("voice", "troy")
+        record_usage(tts_chars=len(text))
+        body = {
+            "model": timing.tts_model,
+            "voice": timing.voice_id,
+            "input": text,
+            "response_format": g.get("response_format", "wav"),
+        }
+        r = requests.post(
+            "https://api.groq.com/openai/v1/audio/speech",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json=body, stream=True, timeout=60,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"Groq TTS HTTP {r.status_code}: {r.text[:300]}")
+        w = wavemod.open(io.BytesIO(r.content))
+        sr = w.getframerate()
+        samples = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+        w.close()
+        if sr != 16000:
+            samples = resample_poly(samples, 16000, sr).astype(np.int16)
+        data = samples.tobytes()
+        for i in range(0, len(data), 8192):
+            chunk = data[i:i + 8192]
+            if timing.first_tts_audio_byte_monotonic is None:
+                timing.first_tts_audio_byte_monotonic = time.perf_counter()
+            yield chunk
+
+    def _kokoro_chunks(self, text: str, timing: TurnTiming, voice: dict) -> Iterator[bytes]:
+        timing.tts_model = "kokoro-v1.0"
+        timing.voice_id = voice.get("kokoro", {}).get("voice", "bm_lewis")
+        record_usage(tts_chars=len(text))
+        pcm = self._get_kokoro(voice).synth_pcm16(text)
+        data = pcm.tobytes()
+        for i in range(0, len(data), 8192):
+            chunk = data[i:i + 8192]
+            if timing.first_tts_audio_byte_monotonic is None:
+                timing.first_tts_audio_byte_monotonic = time.perf_counter()
+            yield chunk
+
+    def _get_kokoro(self, voice: dict) -> "KokoroTTS":
+        global _KOKORO
+        if _KOKORO is None:
+            with _KOKORO_LOCK:
+                if _KOKORO is None:
+                    _KOKORO = KokoroTTS(voice.get("kokoro") or {})
+        return _KOKORO
+
+    def _elevenlabs_chunks(self, text: str, timing: TurnTiming, voice: dict) -> Iterator[bytes]:
         key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
         if not key:
             raise RuntimeError("ElevenLabs API key not found")
@@ -858,6 +980,32 @@ async def usage() -> JSONResponse:
 
 
 WS_CLIENTS: set = set()
+
+
+_VOICE_LOCK = threading.Lock()
+
+
+@app.get("/api/voice/settings")
+async def voice_settings_get() -> JSONResponse:
+    return JSONResponse({
+        "provider": (CFG.get("voice") or {}).get("provider", "kokoro"),
+        "cloud_available": bool(os.environ.get("GROQ_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")),
+        "local_available": True,
+    })
+
+
+@app.post("/api/voice/settings")
+async def voice_settings_set(request: Request) -> JSONResponse:
+    """Runtime voice provider toggle (no server restart). Persisted in-memory
+    only; config/server.yaml keeps the boot default."""
+    body = await request.json()
+    provider = str(body.get("provider") or "").lower()
+    if provider not in {"kokoro", "groq", "elevenlabs"}:
+        return JSONResponse({"error": f"unknown provider {provider!r}"}, status_code=400)
+    with _VOICE_LOCK:
+        (CFG.setdefault("voice", {}))["provider"] = provider
+    print(f"voice provider switched -> {provider}", flush=True)
+    return JSONResponse({"provider": provider})
 
 
 @app.post("/api/summon")

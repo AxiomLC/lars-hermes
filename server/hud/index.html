@@ -308,8 +308,9 @@ footer{
   <div class="col">
     <div class="panel"><h2><span>MODELS LOADOUT</span><span class="num">06</span></h2>
       <div class="kv"><span>Brain</span><b>hermes-agent</b></div>
-      <div class="kv"><span>STT</span><b>whisper base.en</b></div>
-      <div class="kv"><span>TTS</span><b>ElevenLabs Flash v2.5</b></div>
+      <div class="kv"><span>STT</span><b id="vStt">whisper tiny.en (local)</b></div>
+      <div class="kv"><span>TTS</span><b id="vTts">—</b></div>
+      <div class="kv"><span>Voice mode</span><button class="btn" id="voiceToggle" style="padding:2px 8px">—</button></div>
       <div class="kv"><span>Fallback</span><b>claude-haiku-4-5</b></div>
       <div style="border-top:1px solid var(--line); margin:6px 0 4px"></div>
       <div class="kv"><span>Tokens today</span><b id="uTok">—</b></div>
@@ -723,7 +724,30 @@ async function refreshUsage(){
     }
   }catch{}
 }
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();
+refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshVoiceMode();
+async function refreshVoiceMode(){
+  try{
+    const r=await fetch("/api/voice/settings"); const j=await r.json();
+    const p=j.provider;
+    $("vTts").textContent=p==="kokoro"?"Kokoro v1.0 (local)":p==="groq"?"Groq Orpheus (cloud)":p==="elevenlabs"?"ElevenLabs (cloud)":p;
+    const b=$("voiceToggle");
+    if(!j.cloud_available&&p!=="kokoro"){
+      b.textContent="LOCAL (fallback)"; b.title="Cloud provider selected but no cloud key in .env — calls fall back to local Kokoro";
+    }else if(p==="kokoro"){
+      b.textContent=j.cloud_available?"LOCAL — to CLOUD":"LOCAL (no cloud key)";
+      b.title=j.cloud_available?"Switch to cloud voice (Groq, faster, sends spoken text to Groq)":"Add GROQ_API_KEY or ELEVENLABS_API_KEY to Hermes .env to enable cloud voice";
+    }else{
+      b.textContent="CLOUD — to LOCAL"; b.title="Switch to fully local voice (Kokoro, offline, private)";
+    }
+  }catch{}
+}
+$("voiceToggle").onclick=async()=>{
+  const goingCloud=!($("voiceToggle").textContent||"").includes("to CLOUD")&&!($("voiceToggle").textContent||"").includes("CLOUD —");
+  const target=goingCloud?"groq":"kokoro";
+  try{ await fetch("/api/voice/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:target})}); }catch{}
+  refreshVoiceMode();
+};
+setInterval(refreshVoiceMode,30000);
 setInterval(refreshUsage,60000);
 setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
 setInterval(refreshSkills,120000);

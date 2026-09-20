@@ -21,3 +21,10 @@ venv/
 .DS_Store
 Thumbs.db
 nohup.out
+
+# Lars: local model binaries & test artifacts (setup-time downloads, never commit)
+server/models/kokoro/*.onnx
+server/models/kokoro/*.bin
+server/models/kokoro/test_*.wav
+server/boot_log.txt
+server/e2e_in.wav
