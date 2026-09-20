@@ -1,4 +1,7 @@
-# J.A.R.V.I.S — Voice + HUD for Hermes Agent
+# J.A.R.V.I.S — Voice + HUD for Hermes Agent (Lars build)
+
+> **This fork = "Lars"** (AxiomLC's master agent platform). Local-voice Jarvis HUD with 5 Div profiles.
+> **Start here: [SETUP.md](SETUP.md)** — machine specs, hybrid voice architecture (Groq cloud + local Kokoro, runtime toggle), 5-Div spec, and §9 machine-migration guide. Upstream: [eadmin2/jarvis_ai](https://github.com/eadmin2/jarvis_ai).
 
 A self-hosted, Iron-Man-style voice assistant and command center built on top of
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) (NousResearch's
