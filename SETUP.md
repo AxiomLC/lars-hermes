@@ -34,18 +34,21 @@ Master agent/platform name: **Lars**. Core setup doc for the customized Hermes U
 - Reuse as-is: `server/` (FastAPI voice pipeline + HUD host), `server/hud/` (single-file vanilla JS — no build step), `hermes-plugin/` (agent summons HUD panels), `client/` (push-to-talk).
 - Upstream tested on macOS/Apple Silicon; Windows needs the documented launch/systemd → Task Scheduler / service adjustments.
 
-## 4. Component decisions (final)
+## 4. Component decisions (final — updated after Phase 3)
 
 | Component | Choice | Rationale |
 |---|---|---|
-| STT | `faster-whisper` `tiny.en`, `int8`, `device=cpu` | Only near-real-time option on dual-core CPU |
-| TTS | Kokoro local ONNX (`kokoro-onnx`) | ~82M params, CPU-viable; **replaces jarvis_ai's cloud ElevenLabs provider**. Voice: **`bm_lewis`** — objectively lowest male voice in the pack (median F0 92 Hz measured; `am_onyx` 93 Hz runner-up; all 12 male voices swept with autocorrelation F0). Listen samples: `voice_sample_bm_lewis.wav` / `voice_sample_am_onyx.wav` in repo root. |
-| Voice host | `jarvis_ai/server` (FastAPI) | Already implements streaming STT → Hermes → TTS |
-| Architecture | **5 isolated Hermes profiles**, one active at a time | CPU can't run concurrent agents; isolation keeps memory/context/skills per module |
+| STT | `faster-whisper` `tiny.en`, `int8`, `device=cpu` — **fully local, verified** (~1.4–2.4s per utterance) | Real-time on dual-core CPU; never leaves the machine |
+| TTS cloud (default toggle) | **Groq Orpheus** `canopylabs/orpheus-v1-english`, voice `troy` — **1.36s to first audio** (measured) | Fastest; requires one-time model-terms acceptance in Groq console + `GROQ_API_KEY` |
+| TTS local (fallback / privacy mode) | Kokoro v1.0 ONNX, voice **`bm_lewis`** (lowest male, median F0 92 Hz measured across all 12 male voices) | ~9.2s to first audio on i7-6600U — acceptable in privacy mode; auto-fallback target |
+| Voice host | `jarvis_ai/server` (FastAPI) | Streaming STT → Hermes → TTS; sentence-level streaming |
+| Architecture | **5 isolated Hermes profiles (Divs)**, one active at a time | CPU can't run concurrent agents; isolation keeps memory/context/skills per module |
 
-**API keys — none needed for voice.** Whisper and Kokoro are fully local: model files are fetched **once at install time** from Hugging Face (public, no account), then runtime is 100% offline — no keys, no cloud calls, for either STT or TTS. Only Lars' LLM brain (OpenRouter/DeepInfra) uses API keys.
+**Hybrid voice (decided, supersedes original zero-cloud rule #1):** the HUD has a runtime **LOCAL↔CLOUD** voice toggle (`/api/voice/settings`, no restart). Cloud failure auto-falls-back to local Kokoro mid-turn (proven live). STT always stays local.
 
-**Kokoro on local disk (setup-time downloads, do not commit):** `server/models/kokoro/` — `kokoro-v1.0.onnx` (311MB), `voices-v1.0.bin` (27MB, from kokoro-onnx GitHub releases `model-files-v1.0`; the per-voice `.bin` files on HF are raw arrays kokoro-onnx cannot load), `config.json`, `tokenizer.json`. Benchmark on i7-6600U: ~11–13s to synthesize 6s of speech (~2× realtime); if too slow in practice, swap to `model_quantized.onnx` (int8).
+**API keys:** voice needs **no keys in local mode** (models are one-time public downloads from Hugging Face / kokoro-onnx GitHub releases). Cloud mode uses `GROQ_API_KEY` (also supports ElevenLabs). The brain uses OpenRouter + DeepInfra. All keys live only in the Hermes `.env`.
+
+**Kokoro on local disk (gitignored, do not commit):** `server/models/kokoro/` — `kokoro-v1.0.onnx` (311MB), `voices-v1.0.bin` (27MB, from kokoro-onnx GitHub releases `model-files-v1.0`; the per-voice `.bin` files on HF are raw arrays kokoro-onnx cannot load), `config.json`, `tokenizer.json`. Quantized variants (`model_quantized`, `model_q8f16`) tested **slower** on this CPU — do not switch.
 
 
 ## 5. The 5 Divs (profiles/agents/modules)
@@ -64,7 +67,7 @@ Profile directory names: `div7` (master, effectively the default "Lars" profile)
 
 ## 6. Hard rules
 
-1. **Zero cloud calls for STT or TTS.** Fully offline voice pipeline. Verify by code inspection (no external speech endpoint reachable in the default path) — not by trusting config.
+1. **Voice privacy by default, speed by choice:** STT is always local. TTS boots local (Kokoro); cloud (Groq) is opt-in via the HUD toggle and auto-falls-back to local on failure. Spoken text goes to Groq's servers only while CLOUD is selected.
 2. No edits to Hermes core source; integration only via API server + profile mechanism.
 3. Secrets go in `.env` only; settings in `config.yaml` only; both never committed.
 4. HUD customizations happen in `server/hud/` in place — no build step introduced.
@@ -111,10 +114,36 @@ JARVIS_HUD_TOKEN=jarvis-<random hex>
 # 6. Create 5 profiles → HUD menu switching, no restart
 ```
 
-## 9. Acceptance checklist
+## 9. Migration — porting this whole setup to another machine (e.g. stronger desktop / VPS)
+
+Everything splits into three bundles:
+
+1. **This repo** (`git clone AxiomLC/lars-hermes`) — code + docs. On the target:
+   ```bash
+   cd server && python -m venv .venv
+   .venv/Scripts/pip install fastapi uvicorn requests pyyaml numpy scipy anthropic \
+       RealtimeSTT faster-whisper silero-vad websockets psutil kokoro-onnx soundfile onnxruntime
+   bash scripts/make-certs.sh      # regenerates TLS certs for the NEW machine's LAN IP
+   ```
+2. **Model downloads** (gitignored — re-fetch or copy `server/models/kokoro/`):
+   ```bash
+   curl -L -o server/models/kokoro/kokoro-v1.0.onnx  https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx
+   curl -L -o server/models/kokoro/voices-v1.0.bin   https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+   curl -L -o server/models/kokoro/config.json       https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/config.json
+   curl -L -o server/models/kokoro/tokenizer.json    https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json
+   ```
+   (whisper `tiny.en` auto-downloads to the HF cache on first run)
+3. **Hermes state** — zip `%LOCALAPPDATA%\hermes\` from the source machine → `~/.hermes/` (Linux/mac) or `%LOCALAPPDATA%\hermes\` (Windows) on the target, **EXCLUDING**: `.env`, `auth.json`, `pairing/`, `sessions/`, `state.db*`, `logs/`, caches. Re-create `.env` entries fresh on the target: `API_SERVER_ENABLED=true`, `API_SERVER_KEY`, `JARVIS_HUD_TOKEN`, `OPENROUTER_API_KEY`, `DEEPINFRA_API_KEY`, `GROQ_API_KEY`.
+
+**Post-migration checklist:** `hermes gateway install` (login autostart) → `/health` on 8642 → boot `server/server.py` → run `scripts/ws_e2e_test.py` with a 16k WAV → toggle voice LOCAL↔CLOUD in HUD → Groq terms already accepted per org (no re-accept needed unless new org).
+
+**On stronger hardware, revisit:** Kokoro local mode will get much faster (worth re-benchmarking — the local-privacy mode may become the daily default); whisper could step up to `small.en`/`base.en` for accuracy; multiple Divs may even run concurrently if RAM/CPU allow.
+
+## 10. Acceptance checklist
 
 - [ ] No outbound network calls for STT/TTS in default operation (verified by inspection)
-- [ ] Voice round trip works on CPU-only hardware
+- [x] Voice round trip works on CPU-only hardware (verified: full turn incl. agent tool call)
+- [x] Hybrid TTS: cloud Groq (1.36s first audio) with proven local Kokoro fallback + HUD toggle
 - [ ] All 5 profiles exist, isolated, individually addressable, no shared memory/context
 - [ ] HUD menu switches active profile without full server restart (or limitation documented + flagged)
 - [ ] Orb relegate/expand fires off real activity events across all 5 profiles; input parity at every size
