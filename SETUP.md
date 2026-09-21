@@ -1,6 +1,8 @@
-# SETUP — Lars HUD on Hermes (Local-Voice Build)
+# SETUP — Lars (Hermes Agent Platform)
 
-Master agent/platform name: **Lars**. Core setup doc for the customized Hermes UI project. Full execution spec: see the build spec (Phase 1–5) referenced in the repo docs; this file is the stable source of truth for environment, constraints, and architecture.
+Master agent/platform name: **Lars**. This is the stable source of truth for environment, constraints, architecture, and the user's UI requirements.
+
+**Architecture pivot (decided):** the Lars UI is built on **`hermes-workspace`** (React 19 + TS + Tailwind 4, zero-fork on vanilla Hermes) — NOT the legacy single-file HUD in this repo. This repo (`lars-hermes`) is now the **voice server module** only. See §10.
 
 ---
 
@@ -14,139 +16,127 @@ Master agent/platform name: **Lars**. Core setup doc for the customized Hermes U
 | RAM | 16GB |
 | Disk | 238GB SSD |
 | Shell | Git Bash (MSYS2) — use POSIX syntax in scripts |
-| Python | 3.11+ (venv per project) |
+| Python | 3.11+ (venv per project) · Node 22 + pnpm (workspace UI) |
 | Host user | `Admin` (hostname `Dave-new-folio`) |
 
 ## 2. Existing Hermes install (do NOT modify core)
 
 - Hermes lives at `C:\Users\Admin\AppData\Local\hermes\` (Hermes home / `$HERMES_HOME` equivalent).
 - Runs bare-metal with full machine access; protection model is **policy-based only**: `approvals.mode` (smart/manual) gates destructive shell commands, secret redaction filters tool output. There is **no OS-level sandbox** — treat agent commands accordingly.
-- Integration surface: Hermes API server only.
-  - `API_SERVER_ENABLED=true`, port **8642**, loopback-bound, in `AppData\Local\hermes\.env`
-  - Generate `API_SERVER_KEY` + `JARVIS_HUD_TOKEN` at setup (never hardcode, never commit)
+- Integration surfaces (all documented, no core edits):
+  - **Gateway API**: `API_SERVER_ENABLED=true`, port **8642**, loopback, in `AppData\Local\hermes\.env`
+  - **Dashboard API**: port **9119** (sessions/skills/jobs/config) — `hermes dashboard --port 9119 --host 127.0.0.1 --no-open`
+  - Secrets: `API_SERVER_KEY` + `JARVIS_HUD_TOKEN` (never hardcode, never commit)
 - Profiles: independent agent instances under `AppData\Local\hermes\profiles\<name>\` — each has isolated skills, memories, cron, plugins. One active at a time.
-- CLI reference: `hermes config set KEY VAL` for settings; **never hand-edit `config.yaml`** (stray indent can corrupt the live gateway).
+- CLI: `hermes config set KEY VAL` for settings; **never hand-edit `config.yaml`**.
+- Note: the Hermes **desktop app** ships its own wired mic/TTS in chat (confirmed v0.21.3). That voice belongs to the desktop client, not the 8642 API surface — third-party UIs still need this repo's voice server.
 
-## 3. Base project
+## 3. The two repos
 
-- Fork/clone: `https://github.com/eadmin2/jarvis_ai` (MIT) → local path `C:\Users\Admin\jarvis-hermes-hud`
-- Fork on GitHub first so we can push our customizations; clone the fork.
-- Reuse as-is: `server/` (FastAPI voice pipeline + HUD host), `server/hud/` (single-file vanilla JS — no build step), `hermes-plugin/` (agent summons HUD panels), `client/` (push-to-talk).
-- Upstream tested on macOS/Apple Silicon; Windows needs the documented launch/systemd → Task Scheduler / service adjustments.
-
-## 4. Component decisions (final — updated after Phase 3)
-
-| Component | Choice | Rationale |
+| Repo | Role | Local path |
 |---|---|---|
-| STT | `faster-whisper` `tiny.en`, `int8`, `device=cpu` — **fully local, verified** (~1.4–2.4s per utterance) | Real-time on dual-core CPU; never leaves the machine |
-| TTS cloud (default toggle) | **Groq Orpheus** `canopylabs/orpheus-v1-english`, voice `troy` — **1.36s to first audio** (measured) | Fastest; requires one-time model-terms acceptance in Groq console + `GROQ_API_KEY` |
-| TTS local (fallback / privacy mode) | Kokoro v1.0 ONNX, voice **`bm_lewis`** (lowest male, median F0 92 Hz measured across all 12 male voices) | ~9.2s to first audio on i7-6600U — acceptable in privacy mode; auto-fallback target |
-| Voice host | `jarvis_ai/server` (FastAPI) | Streaming STT → Hermes → TTS; sentence-level streaming |
-| Architecture | **5 isolated Hermes profiles (Divs)**, one active at a time | CPU can't run concurrent agents; isolation keeps memory/context/skills per module |
+| `AxiomLC/lars-hermes` | **Voice server module** (FastAPI: whisper STT → Hermes → Groq/Kokoro TTS). Derivative of the MIT-licensed `jarvis_ai` voice-HUD project; upstream remote removed; legacy HUD superseded. | `C:\Users\Admin\lars-hermes` |
+| `outsourc-e/hermes-workspace` | **UI base** (React 19 + TS + Tailwind v4, zero-fork on vanilla Hermes). Talks to gateway :8642 + dashboard :9119 only. | `C:\Users\Admin\hermes-workspace` |
 
-**Hybrid voice (decided, supersedes original zero-cloud rule #1):** the HUD has a runtime **LOCAL↔CLOUD** voice toggle (`/api/voice/settings`, no restart). Cloud failure auto-falls-back to local Kokoro mid-turn (proven live). STT always stays local.
+## 4. Component decisions (final — verified on this machine)
 
-**API keys:** voice needs **no keys in local mode** (models are one-time public downloads from Hugging Face / kokoro-onnx GitHub releases). Cloud mode uses `GROQ_API_KEY` (also supports ElevenLabs). The brain uses OpenRouter + DeepInfra. All keys live only in the Hermes `.env`.
+| Component | Choice | Measured |
+|---|---|---|
+| STT | faster-whisper `tiny.en`, `int8`, `device=cpu` — **fully local** | ~1.4–2.4s per utterance |
+| TTS cloud (opt-in) | **Groq Orpheus** `canopylabs/orpheus-v1-english`, voice `troy` | 1.36s to first audio |
+| TTS local (default/privacy) | Kokoro v1.0 ONNX, voice **`bm_lewis`** (lowest male, median F0 92 Hz — all 12 male voices measured) | ~9.2s to first audio |
+| Fallback | Cloud TTS failure → local Kokoro **mid-turn, automatically** (proven live) | — |
+| Toggle | Runtime, no restart: `/api/voice/settings` | — |
+| LLM brain | Hermes default OpenRouter GLM → fallback chain: OpenRouter DeepSeek v4 Flash → DeepInfra DeepSeek v4 Flash | — |
 
-**Kokoro on local disk (gitignored, do not commit):** `server/models/kokoro/` — `kokoro-v1.0.onnx` (311MB), `voices-v1.0.bin` (27MB, from kokoro-onnx GitHub releases `model-files-v1.0`; the per-voice `.bin` files on HF are raw arrays kokoro-onnx cannot load), `config.json`, `tokenizer.json`. Quantized variants (`model_quantized`, `model_q8f16`) tested **slower** on this CPU — do not switch.
+**Hybrid voice policy:** STT always local. TTS boots local; cloud is opt-in; cloud failure auto-falls-back to local. Spoken text reaches Groq only while CLOUD is selected.
 
+**API keys:** voice needs **no keys in local mode** (one-time public model downloads: HF + kokoro-onnx GitHub releases). Cloud TTS uses `GROQ_API_KEY`. Brain uses OpenRouter + DeepInfra. All keys in Hermes `.env` only.
+
+**Kokoro on local disk (gitignored, never commit):** `server/models/kokoro/` — `kokoro-v1.0.onnx` (311MB), `voices-v1.0.bin` (27MB, from kokoro-onnx GitHub releases `model-files-v1.0`; per-voice `.bin` files on HF are raw arrays kokoro-onnx cannot load), `config.json`, `tokenizer.json`. Quantized variants tested **slower** on this CPU — do not switch.
 
 ## 5. The 5 Divs (profiles/agents/modules)
 
-The 5 profiles are organized as **Divs** with fixed numbers and HUD theme colors. Div 7 is the master — "Lars" himself.
+The 5 profiles are organized as **Divs** with fixed numbers and UI highlight colors. Div 7 is the master — "Lars" himself.
 
 | Div | Color theme | Role |
 |---|---|---|
-| **Div 7 — Master (Lars)** | dark blue | Master coordinator + voice mic module. His knowledge base — always answers verbally about it. Dashboard: consolidated stats of all other Divs; social media posts/comments going out; GI Gross Income (manual weekly entry); truncated crucial-comms module (messages/email); stats of a few n8n flows; custom stock prices. Can pull a HUD browser panel when there's web content to see/discuss. Dashboards use full width. |
+| **Div 7 — Master (Lars)** | dark blue | Master coordinator + voice mic module (lower-left corner). His knowledge base — always answers verbally about it. Dashboard: consolidated stats of all other Divs; social media posts/comments going out; GI Gross Income (manual weekly entry); truncated crucial-comms module (messages/email); stats of a few n8n flows; custom stock prices. Can pull a browser panel when there's web content to see/discuss. Dashboards use full width. |
 | **Div 1 — Comms** | deep gold | WhatsApp, FB Messenger, other social DMs, emails (filtered to crucial), mobile voicemails. **Slack** is the master mobile-app communicator to/from Hermes/Lars (Slack mini-apps + dashboards). |
 | **Div 3 — Records** | pink | Central files; working address-book DB of all known active connections (people & entities); active client records; invoices; Treasury. |
 | **Div 4 — Coding Production** | green | **2 coding production agents:** (a) straight Python/JS — React+Vite / Vue frontend app building; (b) n8n specialist with integration to frontends and CRM functions into Div 6. All important MCPs + tools for AI app production. Native graph-DB app production. |
 | **Div 6 — Public CRM** | yellow | Actual n8n flows doing marketing; any marketing DB; graph DBs. Connects into Div 1. |
 
-Profile directory names: `div7` (master, effectively the default "Lars" profile), `div1`, `div3`, `div4`, `div6`. Exact theme hexes for each Div color are a Phase 5 styling-pass decision. Verify current profile-creation CLI syntax against https://hermes-agent.nousresearch.com/docs/ before implementing.
+Profile directory names: `div7` (master = "Lars" himself), `div1`, `div3`, `div4`, `div6`.
 
 ## 6. Hard rules
 
-1. **Voice privacy by default, speed by choice:** STT is always local. TTS boots local (Kokoro); cloud (Groq) is opt-in via the HUD toggle and auto-falls-back to local on failure. Spoken text goes to Groq's servers only while CLOUD is selected.
-2. No edits to Hermes core source; integration only via API server + profile mechanism.
-3. Secrets go in `.env` only; settings in `config.yaml` only; both never committed.
-4. HUD customizations happen in `server/hud/` in place — no build step introduced.
-5. Profile switching from the HUD must work without full server restart; if the backend only supports one profile per process, that's a flagged scope change, not a silent fallback.
-6. This repo (and the whole setup) must stay **portable**: everything exportable lives in `AppData\Local\hermes\` (skills, memories, cron, platforms, profiles, SOUL.md) plus this repo. When exporting or sharing: **exclude `.env`, `auth.json`, `pairing/`, `sessions/`, `state.db*`** — secrets and private session history.
+1. **Voice privacy by default, speed by choice:** STT always local. TTS boots local (Kokoro); cloud (Groq) opt-in, auto-fallback on failure.
+2. No edits to Hermes core; integration only via documented surfaces (gateway 8642 + dashboard 9119) + profile mechanism. hermes-workspace stays **zero-fork** where feasible.
+3. Secrets in `.env` only; settings in `config.yaml` only; both never committed. Model binaries never committed.
+4. Profile switching from the UI must work without full restart; flag limitations — no silent fallback.
+5. **Portability:** exportable state lives in `AppData\Local\hermes\` + the two repos. Export/share **excludes** `.env`, `auth.json`, `pairing/`, `sessions/`, `state.db*`.
+6. **All future UI modules/plugins adopt the Lars theme** — graph DB viewers, comms summaries, CRM modules. No per-module styling.
 
-## 7. Addendum — layout & wake word (revises Phase 5)
+## 7. UI requirements (user's stated desires — authoritative)
 
-**Layout is state-driven, not fixed:**
-- Idle / first load: voice orb is the dominant, large element — primary surface.
-- On activity start (first message / tool-call / render event from the active profile): orb auto-relegates to a small persistent corner module. Trigger off the **real event**, never a fixed timer (timers clip fast exchanges).
-- Once relegated, the active profile's native view owns the freed space at near-full width — **not** a jarvis_ai embedded viewer panel. Do not route module content through jarvis_ai's viewers.
-- Reverts to full-orb on idle (threshold: N seconds with no activity, or explicit close/done action).
-- Orb stays a live control surface at small size (mic active), never decorative.
-- **Input parity at every size:** anything reachable by voice must also be reachable by click/type, in both large and relegated states. Nothing voice-only.
-- Phase 5 menu visuals are provisional — expect a styling pass after first render; do not hard-code positions/sizes assuming the jarvis_ai skin is final.
+**Aesthetic (sitewide, incl. all future plugin pages):**
+- **Glass look** for cards and stats displays — translucent panels (`--theme-glass` + `backdrop-filter: blur`)
+- **Sharp edges everywhere** — border radius → 0
+- **Deep blue futuristic base color**; edge highlights per Div (§5 colors) around Div pages
+- **Futuristic font** — one font-stack swap in the theme block
+- hermes-workspace ships `src/scifi-theme.css` (cyberpunk HUD starter) — fork its variable block into a "Lars" theme rather than starting from scratch. **Theme mechanism verified in source:** `[data-theme='id'] { --theme-*: ... }` blocks in `src/styles.css`; switching via `src/lib/theme.ts` (`root.setAttribute('data-theme', ...)`); 10 themes ship (Nous/Matrix/Hermes/Bronze/Slate/Mono × light/dark); `--theme-glass` is already a first-class token.
 
-**Gate:** relegate/expand transitions fire reliably off real activity events across all 5 profiles, not just the first one tested.
+**Layout & behavior:**
+- **Do NOT over-engineer voice.** Default Hermes desktop already has voice wired in its chat (mic + TTS buttons — user-confirmed). What Lars adds: a **dynamic mic module in the lower-left corner**, backed by this repo's voice server.
+- The custom menu (left sidebar) stays. One menu item opens the **core Hermes sidebar/menu**; other core Hermes controls may sit top/bottom, restyled to match.
+- **Div pages are basically full width.** The legacy orb layout addendum is **superseded** by this simpler model.
+- **Input parity:** anything reachable by voice must also be reachable by click/type.
+- **Wake word:** local background listener on **"Hey Lars"** wakes the voice surface (no cloud wake-word service).
+- **All future modules adopt the Lars theme** — graph DB viewers, messaging summaries, CRM modules. No per-module custom styling.
 
-**jarvis_ui viewer may be dropped entirely** — it wastes space; we may tweak or replace it. Decision deferred until first render.
+## 8. Voice server — build state (this repo)
 
-**Wake word:** local background listener triggers on **"Hey Lars"** while Hermes is alive in the background — wakes the voice surface (replaces/augments jarvis_ai's push-to-talk ring as the primary activation path). Local VAD/keyword-spotting only — no cloud wake-word service.
+- Phase 1 ✅ Hermes API server on 8642; gateway autostarts at login
+- Phase 2 ✅ STT pinned tiny.en/int8/cpu; <2s verified; no cloud STT paths
+- Phase 3 ✅ Hybrid TTS (Groq 1.36s ↔ Kokoro 9.2s), runtime toggle, auto-fallback, Windows `.env` path fix, full round trip verified incl. agent tool calls
+- Legacy HUD + orb layout: superseded (kept in `server/hud/` for reference)
 
-## 8. Install sequence (summary)
+## 9. Machine migration (porting to a stronger desktop / VPS)
 
-```bash
-# 0. Fork eadmin2/jarvis_ai on GitHub, then:
-git clone https://github.com/<YOU>/jarvis-hermes-hud.git
-cd jarvis-hermes-hud/server
-python -m venv .venv
-.venv/Scripts/pip install fastapi uvicorn requests pyyaml numpy anthropic \
-    RealtimeSTT faster-whisper silero-vad websockets psutil
-
-# 1. Enable Hermes API server (loopback) — edit AppData\Local\hermes\.env:
-API_SERVER_ENABLED=true
-API_SERVER_KEY=<secrets.token_urlsafe(32)>
-JARVIS_HUD_TOKEN=jarvis-<random hex>
-# ELEVENLABS_API_KEY must NOT be needed after Phase 3
-
-# 2. Start: hermes gateway  →  verify 127.0.0.1:8642 reachable
-# 3. Boot server → HUD loads, typed chat works first (gate before Phase 2)
-# 4. Pin STT (tiny.en/int8/cpu) → 10s utterance transcribes <2s, no outbound calls
-# 5. Swap TTS provider to local Kokoro ONNX (model + voice pack downloaded locally at setup)
-# 6. Create 5 profiles → HUD menu switching, no restart
-```
-
-## 9. Migration — porting this whole setup to another machine (e.g. stronger desktop / VPS)
-
-Everything splits into three bundles:
-
-1. **This repo** (`git clone AxiomLC/lars-hermes`) — code + docs. On the target:
+1. **Repos:** clone `AxiomLC/lars-hermes` + the UI repo. Voice server venv:
    ```bash
    cd server && python -m venv .venv
    .venv/Scripts/pip install fastapi uvicorn requests pyyaml numpy scipy anthropic \
        RealtimeSTT faster-whisper silero-vad websockets psutil kokoro-onnx soundfile onnxruntime
-   bash scripts/make-certs.sh      # regenerates TLS certs for the NEW machine's LAN IP
    ```
-2. **Model downloads** (gitignored — re-fetch or copy `server/models/kokoro/`):
-   ```bash
-   curl -L -o server/models/kokoro/kokoro-v1.0.onnx  https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx
-   curl -L -o server/models/kokoro/voices-v1.0.bin   https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
-   curl -L -o server/models/kokoro/config.json       https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/config.json
-   curl -L -o server/models/kokoro/tokenizer.json    https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json
-   ```
-   (whisper `tiny.en` auto-downloads to the HF cache on first run)
-3. **Hermes state** — zip `%LOCALAPPDATA%\hermes\` from the source machine → `~/.hermes/` (Linux/mac) or `%LOCALAPPDATA%\hermes\` (Windows) on the target, **EXCLUDING**: `.env`, `auth.json`, `pairing/`, `sessions/`, `state.db*`, `logs/`, caches. Re-create `.env` entries fresh on the target: `API_SERVER_ENABLED=true`, `API_SERVER_KEY`, `JARVIS_HUD_TOKEN`, `OPENROUTER_API_KEY`, `DEEPINFRA_API_KEY`, `GROQ_API_KEY`.
+2. **Models** (gitignored): re-fetch or copy `server/models/kokoro/` (URLs: HF `onnx-community/Kokoro-82M-v1.0-ONNX` + kokoro-onnx GitHub release `model-files-v1.0`); whisper tiny.en auto-downloads on first run.
+3. **Hermes state:** zip `%LOCALAPPDATA%\hermes\` → target Hermes home, **EXCLUDING** `.env`, `auth.json`, `pairing/`, `sessions/`, `state.db*`, `logs/`, caches. Re-create `.env` keys fresh: `API_SERVER_ENABLED`, `API_SERVER_KEY`, `JARVIS_HUD_TOKEN`, `OPENROUTER_API_KEY`, `DEEPINFRA_API_KEY`, `GROQ_API_KEY`.
+4. **Post-migration checklist:** `hermes gateway install` → `/health` on 8642 → dashboard on 9119 → voice server up → e2e voice test → toggle LOCAL↔CLOUD.
 
-**Post-migration checklist:** `hermes gateway install` (login autostart) → `/health` on 8642 → boot `server/server.py` → run `scripts/ws_e2e_test.py` with a 16k WAV → toggle voice LOCAL↔CLOUD in HUD → Groq terms already accepted per org (no re-accept needed unless new org).
+**On stronger hardware, revisit:** Kokoro local may become the daily default (re-benchmark); whisper could step up to `base.en`/`small.en`; multiple Divs may run concurrently.
 
-**On stronger hardware, revisit:** Kokoro local mode will get much faster (worth re-benchmarking — the local-privacy mode may become the daily default); whisper could step up to `small.en`/`base.en` for accuracy; multiple Divs may even run concurrently if RAM/CPU allow.
+## 10. The pivot — hermes-workspace as UI base (current plan)
 
-## 10. Acceptance checklist
+**Why:** the user's clarified scope is ~90% UI (Div pages, glass theme, full-width layouts, corner mic) and hermes-workspace already ships: runtime profile switching, Operations/Dashboard/Kanban pages, sessions/skills/MCP/files/terminal as themed pages, a 10-theme CSS-variable system, and a scifi theme starter aligned with the futuristic aesthetic. Component architecture scales to the planned plugin pages (graph DB, CRM, comms summaries) far better than a single HTML file.
 
-- [ ] No outbound network calls for STT/TTS in default operation (verified by inspection)
+**Build order:**
+1. Fork `outsourc-e/hermes-workspace` → `AxiomLC`, clone locally
+2. Add the **"Lars" theme** (11th theme): deep-blue futuristic, glass cards, sharp edges, Div highlight scheme, futuristic font — new `[data-theme='lars']` block + registration in `src/lib/theme.ts`
+3. Wire the 5 Divs to Hermes profiles via the workspace's runtime profile switching
+4. Integrate this repo's voice server as the **corner mic module** (lower-left), restyled to theme
+5. Verify profile switching works without restart; flag any backend limitation
+
+**Windows stack notes (from the repo's AGENTS.md):** three services — gateway `:8642`, dashboard `:9119` (`hermes dashboard --port 9119 --host 127.0.0.1 --no-open`), workspace `:3000` (`pnpm dev`). Node 22+, pnpm required. Optional Electron app (`pnpm electron:dev`).
+
+## 11. Acceptance checklist
+
 - [x] Voice round trip works on CPU-only hardware (verified: full turn incl. agent tool call)
-- [x] Hybrid TTS: cloud Groq (1.36s first audio) with proven local Kokoro fallback + HUD toggle
-- [ ] All 5 profiles exist, isolated, individually addressable, no shared memory/context
-- [ ] HUD menu switches active profile without full server restart (or limitation documented + flagged)
-- [ ] Orb relegate/expand fires off real activity events across all 5 profiles; input parity at every size
+- [x] Hybrid TTS: cloud Groq (1.36s first audio) with proven local Kokoro fallback + runtime toggle
+- [ ] Lars theme added to hermes-workspace (glass, sharp edges, deep blue, Div colors, futuristic font)
+- [ ] All 5 Divs exist as isolated Hermes profiles, individually addressable, no shared memory/context
+- [ ] UI profile switching works without full restart
+- [ ] Corner mic module integrated and themed
 - [ ] "Hey Lars" wake word works with Hermes running in background; zero cloud wake-word calls
-- [ ] Hermes core unmodified
-- [ ] Export bundle reproducible: zip of config/SOUL/skills/memories/cron/platforms/profiles minus secrets
+- [ ] Hermes core unmodified; hermes-workspace stays zero-fork where feasible
+- [ ] Export bundle reproducible: repos + Hermes state minus secrets
