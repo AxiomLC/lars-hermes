@@ -28,3 +28,6 @@ server/models/kokoro/*.bin
 server/models/kokoro/test_*.wav
 server/boot_log.txt
 server/e2e_in.wav
+server/models/kokoro/config.json
+server/models/kokoro/tokenizer.json
+voice_sample_*.wav
