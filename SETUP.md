@@ -36,7 +36,7 @@ Master agent/platform name: **Lars**. This is the stable source of truth for env
 | Repo | Role | Local path |
 |---|---|---|
 | `AxiomLC/lars-hermes` | **Voice server module** (FastAPI: whisper STT → Hermes → Groq/Kokoro TTS). Derivative of the MIT-licensed `jarvis_ai` voice-HUD project; upstream remote removed; legacy HUD superseded. | `C:\Users\Admin\lars-hermes` |
-| `outsourc-e/hermes-workspace` | **UI base** (React 19 + TS + Tailwind v4, zero-fork on vanilla Hermes). Talks to gateway :8642 + dashboard :9119 only. | `C:\Users\Admin\hermes-workspace` |
+| `AxiomLC/lars-hermes2-ui` | **UI base** — fork of `outsourc-e/hermes-workspace` (React 19 + TS + Tailwind v4, zero-fork on vanilla Hermes). Talks to gateway :8642 + dashboard :9119 only. Upstream remote kept for pulling upstream fixes. | `C:\Users\Admin\hermes-workspace` |
 
 ## 4. Component decisions (final — verified on this machine)
 
